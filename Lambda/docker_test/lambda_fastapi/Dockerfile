@@ -11,7 +11,7 @@ COPY requirements.txt ${LAMBDA_TASK_ROOT}
 RUN pip install -r requirements.txt
 
 # Copy the main application code
-COPY main.py ${LAMBDA_TASK_ROOT}
+COPY app.py ${LAMBDA_TASK_ROOT}
 
-# Set the CMD to your handler (main.handler refers to the 'handler' function in main.py)
-CMD ["main.handler"]
+# Set the CMD to your handler (app.handler refers to the 'handler' object in app.py)
+CMD ["app.handler"]
