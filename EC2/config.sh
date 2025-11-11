@@ -9,14 +9,14 @@ python3 -m venv venv
 source venv/bin/activate
 
 # Clona tu repo de GitHub
-git clone https://github.com/Vrtx566/tallerEC2.git
-cd tallerEC2
+git clone https://github.com/Vrtx566/finalSO.git
+cd finalSO/EC2
 
 # Instala las dependencias
 pip install -r requirements.txt
 
-# Copia el archivo del servicio
-sudo cp fastapi.srv /etc/systemd/system/
+# Copia el archivo del servicio (nombre recomendado: fastapi.service)
+sudo cp fastapi.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable fastapi.srv
-sudo systemctl start fastapi.srv
+sudo systemctl enable fastapi.service
+sudo systemctl start fastapi.service

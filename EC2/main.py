@@ -1,115 +1,109 @@
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 import boto3
 from botocore.exceptions import ClientError
-import json
-from datetime import datetime
-import uuid
 from botocore.config import Config
+from datetime import datetime
+import io
+import csv
 
-app = FastAPI(title="Taller EC2 API", version="1.0.0")
+app = FastAPI(title="FinalSO", version="1.0.0")
 
-# Configuración de S3
-S3_BUCKET_NAME = "vrtxdb566"  # Cambiar por tu bucket
+# Configuración de S3 (actualizar S3_BUCKET_NAME por el bucket real)
+S3_BUCKET_NAME = "vrtxdb566"
+PERSONAS_KEY = "personas.csv"
+
 session = boto3.Session()
 s3_client = session.client('s3', config=Config(signature_version='s3v4'))
 
 
-# Modelo de validación con Pydantic
 class Persona(BaseModel):
     nombre: str = Field(..., min_length=1, max_length=100, description="Nombre de la persona")
-    edad: int = Field(..., gt=0, lt=150, description="Edad de la persona")
-    email: str = Field(..., description="Email de la persona")
-    telefono: str = Field(..., min_length=7, max_length=15, description="Teléfono de la persona")
-    ciudad: str = Field(..., min_length=1, max_length=100, description="Ciudad de residencia")
-    
-    @field_validator('email')
-    def validar_email(cls, v):
-        if '@' not in v or '.' not in v:
-            raise ValueError('Email debe tener formato válido')
-        return v
-    
-    @field_validator('telefono')
-    def validar_telefono(cls, v):
-        if not v.replace('+', '').replace('-', '').replace(' ', '').isdigit():
-            raise ValueError('Teléfono debe contener solo números, espacios, + o -')
-        return v
+    edad: int = Field(..., ge=0, lt=150, description="Edad de la persona")
+    altura: float = Field(..., gt=0, description="Altura en metros")
+
 
 @app.get("/")
 def root():
-    """Endpoint raíz para verificar que el servicio está funcionando"""
-    return {
-        "mensaje": "API Taller EC2 funcionando correctamente",
-        "timestamp": datetime.now().isoformat()
-    }
+    return {"mensaje": "FinalSO funcionando correctamente", "timestamp": datetime.now().isoformat()}
 
-@app.post("/insert")
-async def insert(persona: Persona):
-    """
-    Endpoint POST que recibe datos de una persona, los valida,
-    los almacena en S3 y retorna la cantidad total de archivos en el bucket.
+
+def _read_csv_from_s3() -> list:
+    """Lee el CSV desde S3 y devuelve una lista de filas (cada fila es dict).
+    Si no existe el objeto, devuelve lista vacía.
     """
     try:
-        # Generar nombre único para el archivo
-        file_id = str(uuid.uuid4())
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        file_name = f"persona_{timestamp}_{file_id}.json"
-        
-        # Convertir el objeto Persona a diccionario y agregar metadata
-        persona_data = persona.model_dump()
-        persona_data['id'] = file_id
-        persona_data['fecha_registro'] = datetime.now().isoformat()
-        
-        # Convertir a JSON
-        json_data = json.dumps(persona_data, indent=2, ensure_ascii=False)
-        
-        # Subir archivo a S3
-        s3_client.put_object(
-            Bucket=S3_BUCKET_NAME,
-            Key=file_name,
-            Body=json_data,
-            ContentType='application/json'
-        )
-        
-        # Contar archivos en el bucket
-        response = s3_client.list_objects_v2(Bucket=S3_BUCKET_NAME)
-        cantidad_archivos = response.get('KeyCount', 0)
-        
-        return {
-            "mensaje": "Persona registrada exitosamente",
-            "archivo": file_name,
-            "cantidad_archivos_total": cantidad_archivos,
-            "datos_guardados": persona_data
-        }
-        
+        resp = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=PERSONAS_KEY)
+        body = resp['Body'].read().decode('utf-8')
+        if not body.strip():
+            return []
+        f = io.StringIO(body)
+        reader = csv.DictReader(f)
+        return list(reader)
     except ClientError as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error al guardar en S3: {str(e)}"
-        )
+        err_code = e.response.get('Error', {}).get('Code')
+        if err_code in ("NoSuchKey", "404"):
+            return []
+        raise
+
+
+def _write_csv_to_s3(rows: list):
+    """Escribe la lista de filas (dict) como CSV en S3 (sobrescribe el objeto)."""
+    if not rows:
+        # crear archivo vacío con cabecera
+        fieldnames = ['nombre', 'edad', 'altura', 'fecha_registro']
+    else:
+        fieldnames = list(rows[0].keys())
+
+    f = io.StringIO()
+    writer = csv.DictWriter(f, fieldnames=fieldnames)
+    writer.writeheader()
+    for r in rows:
+        writer.writerow(r)
+    csv_bytes = f.getvalue().encode('utf-8')
+    s3_client.put_object(Bucket=S3_BUCKET_NAME, Key=PERSONAS_KEY, Body=csv_bytes, ContentType='text/csv; charset=utf-8')
+
+
+@app.post("/person")
+async def add_person(persona: Persona):
+    """Recibe nombre, edad y altura; valida con Pydantic y actualiza `personas.csv` en S3.
+    El CSV es un solo recurso en el bucket y se sobrescribe/actualiza (append + upload).
+    """
+    try:
+        # Leer contenido actual (si existe)
+        rows = _read_csv_from_s3()
+
+        # Preparar nueva fila
+        nueva = {
+            'nombre': persona.nombre,
+            'edad': str(persona.edad),
+            'altura': str(persona.altura),
+            'fecha_registro': datetime.now().isoformat()
+        }
+
+        rows.append(nueva)
+
+        # Escribir de nuevo el CSV en S3 (sobrescribe)
+        _write_csv_to_s3(rows)
+
+        return {"mensaje": "Persona añadida", "total_filas": len(rows)}
+
+    except ClientError as e:
+        raise HTTPException(status_code=500, detail=f"Error al acceder a S3: {e}")
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error interno del servidor: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Error interno: {e}")
 
-@app.get("/count")
-def count_files():
-    """Endpoint para consultar la cantidad de archivos en el bucket"""
+
+@app.get("/person/count")
+def person_count():
+    """Retorna el número de filas del CSV almacenado en S3 (excluye cabecera)."""
     try:
-        response = s3_client.list_objects_v2(Bucket=S3_BUCKET_NAME)
-        cantidad = response.get('KeyCount', 0)
-        return {
-            "cantidad_archivos": cantidad,
-            "bucket": S3_BUCKET_NAME
-        }
+        rows = _read_csv_from_s3()
+        return {"cantidad_filas": len(rows), "archivo": PERSONAS_KEY}
     except ClientError as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error al consultar S3: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Error al consultar S3: {e}")
+
 
 @app.get("/health")
 def health_check():
-    """Endpoint de health check"""
     return {"status": "healthy", "service": "running"}
